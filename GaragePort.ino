@@ -13,6 +13,8 @@ MyMessage msgLight(2, V_LIGHT);
 #define PIN_ACTIVATE 6
 #define PIN_LIGHT_IN  7
 #define POWER_UP     A0
+#define REMOTE_IN    5
+
 //#define TIME_TO_ACTIVATE_PORT 30000
 
 #define ALIVE_INTERVAL 1800000 // Make a ping every half hour
@@ -21,6 +23,7 @@ bool last_light_state = false;
 int direction = V_TEMP;
 int last_direction = V_DOWN;
 unsigned long last_update = 0;
+bool lockdown = false;
 
 void setup()  
 {   
@@ -32,7 +35,7 @@ void setup()
 
   gw.present(1, S_COVER); // GaragePort
   gw.present(2, S_LIGHT); // Light
-  
+  gw.present(3, S_LIGHT); // LockDown
   // Set pin directions
   pinMode(PIN_CLOSE, INPUT);
   pinMode(PIN_OPEN, INPUT);
@@ -48,6 +51,9 @@ void setup()
 void loop() 
 {
   int incomming = 0;
+  if (digitalRead(REMOTE_IN) & !lockdown) {
+    digitalWrite(POWER_UP,HIGH);
+  }
   // Alway process incoming messages whenever possible
   if (digitalRead(PIN_OPEN)) {
     sendPortState(V_UP);
@@ -66,6 +72,7 @@ void loop()
     digitalWrite(PIN_LIGHT, lightState);
     gw.send(msgLight.set(lightState));
     last_light_state = lightState;
+    digitalWrite(POWER_UP, digitalRead(PIN_LIGHT_IN));
   }
   if ((last_update + ALIVE_INTERVAL) < millis()) {
     gw.sendBatteryLevel(100);
@@ -81,18 +88,14 @@ void sendPortState(int pState) {
     Serial.print(F("Port is "));
     switch (pState) {
       case V_UP:
-        digitalWrite(POWER_UP,HIGH);
         Serial.println(F("opening"));
         break;
       case V_DOWN:
-        digitalWrite(POWER_UP,HIGH);
         Serial.println(F("closing"));
         break;
       case V_STOP:
         last_direction = direction;
-        digitalWrite(POWER_UP,LOW);
         Serial.println(F("stopped"));
-//        delay(500);
         break;
     }
     gw.send(msgLight.set(digitalRead(PIN_LIGHT)));
@@ -116,15 +119,19 @@ void incomingMessage(const MyMessage &message) {
   if (message.sensor == 2 & message.type == V_LIGHT ) {
     digitalWrite(PIN_LIGHT, message.getBool()?1:0);
     Serial.print (F("Lights "));
-    Serial.println(message.getBool()?"ON":"OFF");
-    
+    Serial.println(message.getBool()?"ON":"OFF");    
+  }
+  if (message.sensor == 3 & message.type == V_LIGHT ) {
+    lockdown = message.getBool();
+    if (lockdown) digitalWrite(POWER_UP, LOW); // If lockdown, then be sure to remove 24V
   }
 }
 
 void activatePort() {
   pinMode(PIN_ACTIVATE, OUTPUT);
-  digitalWrite(PIN_ACTIVATE, LOW);
   digitalWrite(POWER_UP, HIGH);
+  delay(500); // Let it power up, before we activate port
+  digitalWrite(PIN_ACTIVATE, LOW);
   delay(500);
   digitalWrite(PIN_ACTIVATE, HIGH);
   pinMode(PIN_ACTIVATE, INPUT);

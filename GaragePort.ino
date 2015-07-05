@@ -56,7 +56,7 @@ void setup()
   // Initialize library and add callback for incoming messages
   gw.begin(incomingMessage, 8, true);
   // Send the sketch version information to the gateway and Controller
-  gw.sendSketchInfo("Garage", "1.0");
+  gw.sendSketchInfo("Garage", "1.1");
 
   gw.present(1, S_COVER); // GaragePort
   gw.present(2, S_LIGHT); // Light

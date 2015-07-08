@@ -31,11 +31,11 @@ MyMessage msgLock(3, V_LIGHT);
 
 #define PIN_CLOSE    3
 #define PIN_OPEN     4
-#define PIN_LIGHT_IN 7
+#define PIN_LIGHT    7
 #define PIN_REMOTE   5
 #define PIN_ACTIVATE 6
-#define POUT_LIGHT    A1
-#define POUT_POWER_UP A0
+#define POUT_LIGHT   A1
+#define POUT_POWER   A0
 
 #define ALIVE_INTERVAL 1800000 // Make a ping every half hour
 
@@ -56,7 +56,7 @@ void setup()
   // Initialize library and add callback for incoming messages
   gw.begin(incomingMessage, 8, true);
   // Send the sketch version information to the gateway and Controller
-  gw.sendSketchInfo("Garage", "1.1");
+  gw.sendSketchInfo("Garage", "1.2");
 
   gw.present(1, S_COVER); // GaragePort
   gw.present(2, S_LIGHT); // Light
@@ -66,10 +66,10 @@ void setup()
   pinMode(PIN_OPEN, INPUT);
   pinMode(POUT_LIGHT, OUTPUT);
   pinMode(PIN_ACTIVATE, INPUT);
-  pinMode(PIN_LIGHT_IN, INPUT);
-  pinMode(POUT_POWER_UP, OUTPUT);
-  digitalWrite(POUT_POWER_UP,LOW);
-  last_light_state = !digitalRead(PIN_LIGHT_IN); // Force update of light status, when starting up
+  pinMode(PIN_LIGHT, INPUT);
+  pinMode(POUT_POWER, OUTPUT);
+  digitalWrite(POUT_POWER,LOW);
+  last_light_state = !digitalRead(PIN_LIGHT); // Force update of light status, when starting up
 }
 
 /**
@@ -80,20 +80,21 @@ void loop()
   int incomming = 0;
 
   // Whenever the remote is detected, power up the rest of the circuit, if it's not powered up already
-  if (!lockdown & !digitalRead(POUT_POWER_UP)) {
+  if (!lockdown & !digitalRead(POUT_POWER)) {
     if (digitalRead(PIN_REMOTE)) {
-      digitalWrite(POUT_POWER_UP, HIGH);  
-      unsigned long timer = millis();
+      digitalWrite(POUT_POWER, HIGH);  
+      unsigned long timer1 = millis();
+      unsigned long timer2 = millis();
       while (1) {
-        if (digitalRead(PIN_REMOTE)) timer = millis();  // Wait until pin go low again (user has released the button)
-        if (millis() - timer > 1500) break; //must have been low for at least 1500 mSeconds
+        if (digitalRead(PIN_REMOTE)) timer2 = millis();  // Wait until pin go low again (user has released the button)
+        if (millis() - timer2 > 700) break; //must have been low for at least 1500 mSeconds
       }
-      if (!digitalRead(PIN_OPEN) & !digitalRead(PIN_CLOSE)) activatePort(); // Only activate port, if it's not moving by now.
+      if ((millis()-timer1 > 1400) & !digitalRead(PIN_OPEN) & !digitalRead(PIN_CLOSE)) activatePort(); // Only activate port, if it's not moving by now.
       remoteActivationMillis = millis();
     }
       
     if (!digitalRead(PIN_ACTIVATE)) {
-      digitalWrite(POUT_POWER_UP, HIGH);
+      digitalWrite(POUT_POWER, HIGH);
       unsigned timer = millis();
       while(1) {
         if (!digitalRead(PIN_ACTIVATE)) timer = millis();
@@ -106,8 +107,8 @@ void loop()
   
   // If 30 seconds have passed since we turned on 24V, and garageport light is not on, we turn of the 24V again.
   // this means that the garageport hasn't been opened / closed..
-  if ((millis() - remoteActivationMillis > 30000) & !digitalRead(PIN_LIGHT_IN)) {
-    digitalWrite(POUT_POWER_UP, LOW);
+  if ((millis() - remoteActivationMillis > 30000) & !digitalRead(PIN_LIGHT)) {
+    digitalWrite(POUT_POWER, LOW);
   } 
 
   // Detect if port is opening / Closing, by checking relay states
@@ -122,13 +123,19 @@ void loop()
   }
 
   // Check if we have to turn on/off light (compare to last state of the light)
-  if ((digitalRead(PIN_LIGHT_IN) != last_light_state) ) {
+  if ((digitalRead(PIN_LIGHT) != last_light_state) ) {
     processLight();
   }
 
   // Check if we should send an alive ping to the controller
   if ((millis() - lastPing) > ALIVE_INTERVAL) {
     gw.sendBatteryLevel(100);
+    gw.send(msgLight.set(digitalRead(POUT_LIGHT)));
+    if (direction == V_STOP) // If the port is stopped, then send the last state before we stopped the port
+      gw.send(msgPort.setType(lastDirection));
+    else // Otherwise send the current direction.
+      gw.send(msgPort.setType(direction));
+    gw.send(msgLock.set(!lockdown));
     lastPing = millis();
   }
 
@@ -142,12 +149,12 @@ void loop()
 void processLight()
 {
   Serial.print("Turning light ");
-  bool lightState = digitalRead(PIN_LIGHT_IN);
+  bool lightState = digitalRead(PIN_LIGHT);
   Serial.println(lightState?"ON":"OFF");
   digitalWrite(POUT_LIGHT, lightState);
   gw.send(msgLight.set(lightState));
   last_light_state = lightState;
-  digitalWrite(POUT_POWER_UP, digitalRead(PIN_LIGHT_IN));
+  digitalWrite(POUT_POWER, digitalRead(PIN_LIGHT));
 }
 
 /**
@@ -197,7 +204,12 @@ void incomingMessage(const MyMessage &message) {
   
   if (message.sensor == 3 & message.type == V_LIGHT ) {
     lockdown = !message.getBool(); // Invert lockdown signal from domoticz.
-    if (lockdown) digitalWrite(POUT_POWER_UP, LOW); // If lockdown, then be sure to remove 24V
+    if (lockdown) digitalWrite(POUT_POWER, LOW); // If lockdown, then be sure to remove 24V
+    else {
+      // If we remove the lock, then check if the last action was to open the port, and if the port is stopped.
+      // We assume then that the port is left in the open state, and should be closed, therefore we call activatePort()
+      if ((lastDirection == V_UP) & (direction == V_STOP)) activatePort();
+    }
   }
 }
 
@@ -206,7 +218,7 @@ void incomingMessage(const MyMessage &message) {
  */
 void activatePort() {
   pinMode(PIN_ACTIVATE, OUTPUT);
-  digitalWrite(POUT_POWER_UP, HIGH);
+  digitalWrite(POUT_POWER, HIGH);
   delay(1000); // Let it power up, before we activate port
   digitalWrite(PIN_ACTIVATE, LOW);
   delay(500);

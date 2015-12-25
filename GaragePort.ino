@@ -4,7 +4,7 @@
  * 
  * This sketch is used in an arduino board to tap into an original garageport
  * motor control system. It detects direction of the port, which is sent to 
- * the controller, and also light is sent to controller.
+ * the controller, and also light status is sent to controller.
  * 
  * In adition to control port, and light, it can also lock down the port system,
  * which is done my removing supply to the motor.
@@ -19,15 +19,17 @@
  * 
  **************************************************************************/
 
+#define MY_RADIO_NRF24
 
 #include <MySensor.h>
 #include <SPI.h>
+//#include <avr/wdt.h>
 
-MySensor gw;
+//MySensor gw;
 
 MyMessage msgPort(1, V_STOP);
 MyMessage msgLight(2, V_LIGHT);
-MyMessage msgLock(3, V_LIGHT);
+MyMessage msgLock(3, V_LOCK_STATUS);
 
 #define PIN_CLOSE    3
 #define PIN_OPEN     4
@@ -36,6 +38,7 @@ MyMessage msgLock(3, V_LIGHT);
 #define PIN_ACTIVATE 6
 #define POUT_LIGHT   A1
 #define POUT_POWER   A0
+#define ENCODER_IN   3
 
 #define ALIVE_INTERVAL 1800000 // Make a ping every half hour
 
@@ -46,6 +49,16 @@ bool lockdown = false;
 unsigned long remoteActivationMillis = 0;
 unsigned long limitTransmission = 0;
 unsigned long lastPing = 0;
+unsigned long portCounter = 0;
+
+// LED stuf
+
+// Do a LED change every 200mSeconds
+#define LED_DELAY 200
+unsigned long lastLedProcess = 0;
+uint32_t ledValue = 0;
+
+byte ledFunction;
 
 /**
  * Setup routine
@@ -54,13 +67,7 @@ void setup()
 {   
   Serial.begin(115200);
   // Initialize library and add callback for incoming messages
-  gw.begin(incomingMessage, 8, true);
   // Send the sketch version information to the gateway and Controller
-  gw.sendSketchInfo("Garage", "1.2");
-
-  gw.present(1, S_COVER); // GaragePort
-  gw.present(2, S_LIGHT); // Light
-  gw.present(3, S_LIGHT); // LockDown
   // Set pin directions
   pinMode(PIN_CLOSE, INPUT);
   pinMode(PIN_OPEN, INPUT);
@@ -70,6 +77,19 @@ void setup()
   pinMode(POUT_POWER, OUTPUT);
   digitalWrite(POUT_POWER,LOW);
   last_light_state = !digitalRead(PIN_LIGHT); // Force update of light status, when starting up
+
+  // Enable watchdog, 4 second timeout, just make sure that if we crash somewhere, it restarts the MCU
+  wdt_enable(WDTO_4S);
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_IN), portCounterISR, FALLING);
+}
+
+void presentation() {
+  sendSketchInfo("Garage", "1.2");
+
+  present(1, S_COVER); // GaragePort
+  present(2, S_LIGHT); // Light
+  present(3, S_LOCK); // LockDown
 }
 
 /**
@@ -77,8 +97,9 @@ void setup()
  */
 void loop() 
 {
-  int incomming = 0;
-
+  // Reset watchdog timer
+  wdt_reset();
+  
   // Whenever the remote is detected, power up the rest of the circuit, if it's not powered up already
   if (!lockdown & !digitalRead(POUT_POWER)) {
     if (digitalRead(PIN_REMOTE)) {
@@ -129,18 +150,15 @@ void loop()
 
   // Check if we should send an alive ping to the controller
   if ((millis() - lastPing) > ALIVE_INTERVAL) {
-    gw.sendBatteryLevel(100);
-    gw.send(msgLight.set(digitalRead(POUT_LIGHT)));
+    sendBatteryLevel(100);
+    send(msgLight.set(digitalRead(POUT_LIGHT)));
     if (direction == V_STOP) // If the port is stopped, then send the last state before we stopped the port
-      gw.send(msgPort.setType(lastDirection));
+      send(msgPort.setType(lastDirection));
     else // Otherwise send the current direction.
-      gw.send(msgPort.setType(direction));
-    gw.send(msgLock.set(!lockdown));
+      send(msgPort.setType(direction));
+    send(msgLock.set(!lockdown));
     lastPing = millis();
   }
-
-  // Alway process incoming messages whenever possible
-  gw.process();
 }
 
 /**
@@ -152,7 +170,7 @@ void processLight()
   bool lightState = digitalRead(PIN_LIGHT);
   Serial.println(lightState?"ON":"OFF");
   digitalWrite(POUT_LIGHT, lightState);
-  gw.send(msgLight.set(lightState));
+  send(msgLight.set(lightState));
   last_light_state = lightState;
   digitalWrite(POUT_POWER, digitalRead(PIN_LIGHT));
 }
@@ -161,7 +179,7 @@ void processLight()
  * Sends the port state to mysensors GW.
  */
 void sendPortState(int pState) {
-  if ((direction != pState) & limitTransmission + 500 < millis()) { // 500 milli seconds must have passed since last transmission
+  if ((direction != pState) & (millis() - limitTransmission > 2000)) { // 2 seconds must have passed since last transmission
     Serial.print(F("Port is "));
     switch (pState) {
       case V_UP:
@@ -175,8 +193,8 @@ void sendPortState(int pState) {
         Serial.println(F("stopped"));
         break;
     }
-    gw.send(msgLight.set(digitalRead(POUT_LIGHT)));
-    gw.send(msgPort.setType(pState));
+    send(msgLight.set(digitalRead(POUT_LIGHT)));
+    send(msgPort.setType(pState));
     limitTransmission = millis();
     direction = pState;      
   }
@@ -185,24 +203,24 @@ void sendPortState(int pState) {
 /**
  * Process incomming messages from the controller
  */
-void incomingMessage(const MyMessage &message) {
+void receive(const MyMessage &message) {
   Serial.print(F("Remote command : "));
 
-  if (message.sensor == 1 & (message.type == V_UP | message.type == V_DOWN | message.type == V_STOP)) {
-    if (message.type != direction & message.type != lastDirection) {
+  if ((message.sensor == 1) & ((message.type == V_UP) | (message.type == V_DOWN) | (message.type == V_STOP))) {
+    if ((message.type != direction) & (message.type != lastDirection)) {
       activatePort();
       direction = V_TEMP;
       Serial.println(F("Activate port!"));
     }
   }
 
-  if (message.sensor == 2 & message.type == V_LIGHT ) {
+  if ((message.sensor == 2) & (message.type == V_LIGHT )) {
     digitalWrite(POUT_LIGHT, message.getBool()?1:0);
     Serial.print (F("Lights "));
     Serial.println(message.getBool()?"ON":"OFF");    
   }
   
-  if (message.sensor == 3 & message.type == V_LIGHT ) {
+  if ((message.sensor == 3) & (message.type == V_LIGHT )) {
     lockdown = !message.getBool(); // Invert lockdown signal from domoticz.
     if (lockdown) digitalWrite(POUT_POWER, LOW); // If lockdown, then be sure to remove 24V
     else {
@@ -224,5 +242,10 @@ void activatePort() {
   delay(500);
   digitalWrite(PIN_ACTIVATE, HIGH);
   pinMode(PIN_ACTIVATE, INPUT);
+}
+
+void portCounterISR() {
+  if ((direction == V_UP) && (portCounter > 0)) portCounter --;
+  else portCounter ++;
 }
 
